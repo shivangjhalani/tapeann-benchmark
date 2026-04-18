@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Benchmark data (large binary files)
+data/raw/
+data/tape/
+data/diskann/
+data/gt/
+data/idx/
+bench/plots/*.png
+bench/logs/
+
+# DiskANN build artifacts
+DiskANN/build/

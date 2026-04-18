@@ -1,0 +1,15 @@
+# Index on-disk sizes (MB)  —  captured 2026-04-18 23:35:17
+[TAPEANN]
+  index_tape.bin         1545.2 MB
+  centroids.bin          4.9 MB
+  segment_table.json     35.0 MB
+  global_mean.bin        0.0 MB
+  TOTAL                  1585.1 MB
+[DiskANN]
+  diskann_sift10m_disk.index               7812.5 MB
+  diskann_sift10m_mem.index.data           4882.8 MB
+  diskann_sift10m_pq_compressed.bin        1020.4 MB
+  diskann_sift10m_pq_pivots.bin            0.1 MB
+  diskann_sift10m_sample_data.bin          48.8 MB
+  diskann_sift10m_sample_ids.bin           0.4 MB
+  TOTAL                                    13765.0 MB

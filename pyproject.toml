@@ -1,0 +1,17 @@
+[project]
+name = "tape"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "faiss-cpu>=1.13.2",
+    "h5py>=3.16.0",
+    "hilbertcurve>=2.0.5",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "scikit-learn>=1.8.0",
+    "seaborn>=0.13.2",
+    "ucimlrepo>=0.0.7",
+    "tqdm>=4.66.0",
+]
