@@ -15,7 +15,6 @@ data/tape/
 data/diskann/
 data/gt/
 data/idx/
-bench/plots/*.png
 bench/logs/
 
 # DiskANN build artifacts
