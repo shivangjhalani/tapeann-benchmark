@@ -6,9 +6,12 @@ Replaces TAPEANN's split_dataset.py + export_test.py (which assume HDF5 .mat inp
 Output:
   data/tape/sift10m_base_disjoint.bin  -- raw float32, no header  (TAPEANN)
   data/tape/test_queries.bin           -- raw float32, no header  (TAPEANN)
-  data/diskann/base.fbin               -- [u32 n][u32 d][float32] (DiskANN)
-  data/diskann/query.fbin              -- [u32 n][u32 d][float32] (DiskANN)
+  data/diskann/base.fbin               -- [u32 n][u32 d][float32] (DiskANN fp32 variant)
+  data/diskann/query.fbin              -- [u32 n][u32 d][float32] (DiskANN fp32 variant)
+  data/diskann/base.u8bin              -- [u32 n][u32 d][uint8]   (DiskANN uint8 variant)
+  data/diskann/query.u8bin             -- [u32 n][u32 d][uint8]   (DiskANN uint8 variant)
 
+Idempotent: any output whose size matches n*d*sizeof(dtype)+8 is skipped.
 Run from repo root:  python bench/prep/bvecs_to_bins.py
 """
 
@@ -56,12 +59,20 @@ def bvecs_to_array(path):
     return np.vstack(chunks), dim
 
 
-def write_diskann_bin(arr, path):
-    """Write (n, d) float32 with [uint32 n][uint32 d] header."""
+def write_diskann_bin(arr, path, dtype=np.float32):
+    """Write (n, d) matrix as DiskANN .bin: [u32 n][u32 d][dtype payload]."""
     n, d = arr.shape
     with open(path, "wb") as f:
         np.array([n, d], dtype=np.uint32).tofile(f)
-        arr.astype(np.float32).tofile(f)
+        arr.astype(dtype).tofile(f)
+
+
+def _expected_bin_size(n, d, itemsize):
+    return 8 + n * d * itemsize
+
+
+def _is_complete(path, n, d, itemsize):
+    return os.path.exists(path) and os.path.getsize(path) == _expected_bin_size(n, d, itemsize)
 
 
 def main():
@@ -74,11 +85,23 @@ def main():
     print(f"      {queries.shape[0]:,} vectors × dim={dim}")
 
     query_tape    = os.path.join(TAPE_DIR,    "test_queries.bin")
-    query_diskann = os.path.join(DISKANN_DIR, "query.fbin")
-    queries.astype(np.float32).tofile(query_tape)
-    write_diskann_bin(queries, query_diskann)
+    query_fbin    = os.path.join(DISKANN_DIR, "query.fbin")
+    query_u8bin   = os.path.join(DISKANN_DIR, "query.u8bin")
+    nq = queries.shape[0]
+
+    if os.path.getsize(query_tape) != nq * dim * 4 if os.path.exists(query_tape) else True:
+        queries.astype(np.float32).tofile(query_tape)
     print(f"      → {query_tape}")
-    print(f"      → {query_diskann}")
+
+    if not _is_complete(query_fbin, nq, dim, 4):
+        write_diskann_bin(queries, query_fbin, dtype=np.float32)
+    print(f"      → {query_fbin}")
+
+    if not _is_complete(query_u8bin, nq, dim, 1):
+        # Queries are uint8 in source; clamp to safe range before cast.
+        q_u8 = np.clip(queries, 0, 255).astype(np.uint8)
+        write_diskann_bin(q_u8, query_u8bin, dtype=np.uint8)
+    print(f"      → {query_u8bin}")
 
     # ---- Base vectors (10M × 128, chunked) ----
     record_size      = 4 + dim
@@ -89,33 +112,49 @@ def main():
     print(f"      {total_vecs:,} vectors × dim={dim}  "
           f"→ {total_vecs * dim * 4 / 1e9:.2f} GB float32 output each")
 
-    base_tape    = os.path.join(TAPE_DIR,    "sift10m_base_disjoint.bin")
-    base_diskann = os.path.join(DISKANN_DIR, "base.fbin")
+    base_tape   = os.path.join(TAPE_DIR,    "sift10m_base_disjoint.bin")
+    base_fbin   = os.path.join(DISKANN_DIR, "base.fbin")
+    base_u8bin  = os.path.join(DISKANN_DIR, "base.u8bin")
+
+    do_tape  = not (os.path.exists(base_tape)  and os.path.getsize(base_tape)  == total_vecs * dim * 4)
+    do_fbin  = not _is_complete(base_fbin,  total_vecs, dim, 4)
+    do_u8bin = not _is_complete(base_u8bin, total_vecs, dim, 1)
+
+    if not (do_tape or do_fbin or do_u8bin):
+        print("      All base outputs already complete — skipping.")
+        return
 
     written = 0
-    with open(base_tape, "wb") as ft, open(base_diskann, "wb") as fd:
-        # DiskANN header placeholder — patched after the loop
-        fd.write(np.zeros(2, dtype=np.uint32).tobytes())
+    ft  = open(base_tape,  "wb") if do_tape  else None
+    ff  = open(base_fbin,  "wb") if do_fbin  else None
+    fu  = open(base_u8bin, "wb") if do_u8bin else None
+    try:
+        if ff: ff.write(np.zeros(2, dtype=np.uint32).tobytes())   # header placeholder
+        if fu: fu.write(np.zeros(2, dtype=np.uint32).tobytes())
 
         with tqdm(total=total_vecs, unit="vec", unit_scale=True,
                   unit_divisor=1000, desc="  converting",
                   bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} vecs "
                              "[{elapsed}<{remaining}, {rate_fmt}]") as pbar:
             for chunk, _ in read_bvecs_chunked(BASE_BVECS):
-                chunk.astype(np.float32).tofile(ft)
-                chunk.astype(np.float32).tofile(fd)
+                if ft: chunk.astype(np.float32).tofile(ft)
+                if ff: chunk.astype(np.float32).tofile(ff)
+                if fu: np.clip(chunk, 0, 255).astype(np.uint8).tofile(fu)
                 written += len(chunk)
                 pbar.update(len(chunk))
 
-        fd.seek(0)
-        np.array([written, dim], dtype=np.uint32).tofile(fd)
+        if ff:
+            ff.seek(0); np.array([written, dim], dtype=np.uint32).tofile(ff)
+        if fu:
+            fu.seek(0); np.array([written, dim], dtype=np.uint32).tofile(fu)
+    finally:
+        for f in (ft, ff, fu):
+            if f: f.close()
 
-    tape_bytes = os.path.getsize(base_tape)
-    assert tape_bytes == written * dim * 4, \
-        f"Size mismatch: {tape_bytes} vs {written * dim * 4}"
-
-    print(f"\n      → {base_tape}  ({tape_bytes/1e9:.2f} GB)")
-    print(f"      → {base_diskann}  ({os.path.getsize(base_diskann)/1e9:.2f} GB)")
+    for label, path in [("tape fp32", base_tape), ("diskann fp32", base_fbin),
+                        ("diskann u8",  base_u8bin)]:
+        if os.path.exists(path):
+            print(f"      → {label:<14} {path}  ({os.path.getsize(path)/1e9:.2f} GB)")
     print(f"\n[+] Done. {written:,} base vectors converted.")
 
 

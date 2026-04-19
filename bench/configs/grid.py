@@ -1,56 +1,224 @@
 """
-Parameter grids and paths for the TAPEANN vs DiskANN benchmark.
+Central config: datasets, index variants, cache modes, param grids, paths.
+
+Everything downstream (build scripts, runners, analyzers) reads from here.
+No YAML — plain Python dicts keep imports simple and let us compute derived
+values (paths, budget calculations) in one place.
 """
 
 import os
 
-REPO_ROOT   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ---- Data paths ----
-DATA        = os.path.join(REPO_ROOT, "data")
-TAPE_DATA   = os.path.join(DATA, "tape")
-DISKANN_DATA= os.path.join(DATA, "diskann")
-GT_DIR      = os.path.join(DATA, "gt")
-IDX_DIR     = os.path.join(DATA, "idx")
+# ─── Top-level paths ─────────────────────────────────────────────────────────
+DATA_ROOT    = os.path.join(REPO_ROOT, "data")
+RAW_DIR      = os.path.join(DATA_ROOT, "raw")
+TAPE_DATA    = os.path.join(DATA_ROOT, "tape")
+DISKANN_DATA = os.path.join(DATA_ROOT, "diskann")
+GT_DIR       = os.path.join(DATA_ROOT, "gt")
+IDX_DIR      = os.path.join(DATA_ROOT, "idx")
 
-# ---- Binary / script paths ----
-TAPE_WRITER     = os.path.join(REPO_ROOT, "sift10m_code", "ram_algo_implementation", "tape_writer.py")
-TAPE_BENCH_SRC  = os.path.join(REPO_ROOT, "sift10m_code", "ram_algo_implementation", "benchmark_search.cpp")
-TAPE_BENCH_BIN  = os.path.join(TAPE_DATA, "benchmark_search")   # compiled binary lives in data/tape/
-
-DISKANN_BENCH   = os.path.join(REPO_ROOT, "DiskANN", "target", "release", "diskann-benchmark")
-
-DISKANN_INDEX_PREFIX = os.path.join(IDX_DIR, "diskann_sift10m")
-DISKANN_BASE    = os.path.join(DISKANN_DATA, "base.fbin")
-DISKANN_QUERY   = os.path.join(DISKANN_DATA, "query.fbin")
-DISKANN_GT      = os.path.join(GT_DIR, "gt100.diskann.bin")
-
-# ---- Results / logs ----
 RESULTS_DIR = os.path.join(REPO_ROOT, "bench", "results")
 LOGS_DIR    = os.path.join(REPO_ROOT, "bench", "logs")
-PLOTS_DIR   = os.path.join(REPO_ROOT, "bench", "plots")
+PLOTS_DIR   = os.path.join(RESULTS_DIR, "plots")
 
-# ---- TAPEANN search grid ----
-# probes: number of clusters to read per query (max io_uring queue = 256)
+# Result CSVs (new unified schema, replaces old per-algo CSVs)
+RUNS_CSV        = os.path.join(RESULTS_DIR, "runs.csv")
+BUILD_COSTS_CSV = os.path.join(RESULTS_DIR, "build_costs.csv")
+INDEX_SIZES_TXT = os.path.join(RESULTS_DIR, "index_sizes.txt")
+ENV_TXT         = os.path.join(RESULTS_DIR, "env.txt")
+
+# ─── Binaries / source paths ─────────────────────────────────────────────────
+TAPE_SRC_DIR    = os.path.join(REPO_ROOT, "sift10m_code", "ram_algo_implementation")
+TAPE_WRITER     = os.path.join(TAPE_SRC_DIR, "tape_writer.py")
+TAPE_BENCH_SRC  = os.path.join(TAPE_SRC_DIR, "benchmark_search.cpp")
+TAPE_BENCH_BIN  = os.path.join(TAPE_DATA, "benchmark_search")
+
+DISKANN_BENCH   = os.path.join(REPO_ROOT, "DiskANN", "target", "release",
+                               "diskann-benchmark")
+
+# ─── Datasets ────────────────────────────────────────────────────────────────
+#   nvecs        : number of base vectors
+#   dim          : vector dimension
+#   raw_bvecs    : input file (bigann_base_{profile}.bvecs, uint8 bvecs format)
+#   query_bvecs  : query file (bigann_query.bvecs)
+#   n_queries    : number of queries to measure on
+#
+# Only sift10m is active; sift1m and sift100m are declared so builders
+# and runners can accept them later without code changes.
+
+DATASETS = {
+    "sift1m": {
+        "nvecs":       1_000_000,
+        "dim":         128,
+        "raw_bvecs":   os.path.join(RAW_DIR, "bigann_base_sift1m.bvecs"),
+        "query_bvecs": os.path.join(RAW_DIR, "bigann_query.bvecs"),
+        "n_queries":   10_000,
+    },
+    "sift10m": {
+        "nvecs":       10_000_000,
+        "dim":         128,
+        "raw_bvecs":   os.path.join(RAW_DIR, "bigann_base_10M.bvecs"),  # legacy name
+        "query_bvecs": os.path.join(RAW_DIR, "bigann_query.bvecs"),
+        "n_queries":   10_000,
+    },
+    "sift100m": {
+        "nvecs":       100_000_000,
+        "dim":         128,
+        "raw_bvecs":   os.path.join(RAW_DIR, "bigann_base_sift100m.bvecs"),
+        "query_bvecs": os.path.join(RAW_DIR, "bigann_query.bvecs"),
+        "n_queries":   10_000,
+    },
+}
+
+ACTIVE_DATASETS = ["sift10m"]  # sweep targets
+
+# ─── Index build variants ────────────────────────────────────────────────────
+# Keyed by variant name; consumed by build scripts.
+
+TAPE_VARIANTS = {
+    "tape_int8": {
+        "algo":        "tapeann",
+        "quant":       "int8",        # asymmetric int8 (existing)
+        "n_clusters":  10_000,
+        "dim_pca":     8,
+    },
+    "tape_fp32": {
+        "algo":        "tapeann",
+        "quant":       "fp32",        # requires benchmark_search.cpp update to load fp32 tape
+        "n_clusters":  10_000,
+        "dim_pca":     8,
+    },
+}
+
+DISKANN_VARIANTS = {
+    # Existing fp32 build (kept as-is). PQ chunks ~64 MB for 10M × 128d.
+    "diskann_fp32_pq64": {
+        "algo":          "diskann",
+        "data_type":     "float32",
+        "base_suffix":   "fbin",
+        "R":             64,
+        "L_build":       100,
+        "num_pq_chunks": 64,
+        "M_ram_GB":      32,
+    },
+    # Matched-byte build: BIGANN is natively uint8; this is the fair head-to-head
+    # against TAPE int8 (same bytes/vector, same bits of precision in the vector
+    # store).
+    "diskann_uint8_pq32": {
+        "algo":          "diskann",
+        "data_type":     "uint8",
+        "base_suffix":   "u8bin",
+        "R":             64,
+        "L_build":       100,
+        "num_pq_chunks": 32,
+        "M_ram_GB":      32,
+    },
+    "diskann_uint8_pq64": {
+        "algo":          "diskann",
+        "data_type":     "uint8",
+        "base_suffix":   "u8bin",
+        "R":             64,
+        "L_build":       100,
+        "num_pq_chunks": 64,
+        "M_ram_GB":      32,
+    },
+}
+
+# tape_fp32 is declared in TAPE_VARIANTS but not active: the current
+# benchmark_search.cpp and tape_writer only support int8 layout. Adding
+# fp32 would require a new record format + writer; deferred per disk budget.
+ACTIVE_VARIANTS = [
+    "tape_int8",
+    "diskann_fp32_pq64",
+    "diskann_uint8_pq32",
+    "diskann_uint8_pq64",
+]
+
+# ─── Cache / memory regimes ──────────────────────────────────────────────────
+# Applied uniformly to both systems.
+#
+#   cold_strict : truly cold per-query
+#                 - tape:    O_DIRECT flag
+#                 - diskann: drop_caches before each query batch (approximation;
+#                            the Rust binary is one process, so per-query is
+#                            impractical — we use per-run + posix_fadvise
+#                            DONTNEED wrapper).
+#   cold_start  : drop_caches once; page cache warms naturally during the run
+#   warm_steady : 2000-query warmup discarded, then measure
+#   ram_capped_* : run under systemd-run scope with MemoryMax = fraction of
+#                  the on-disk index bytes (forces real disk I/O even when
+#                  physical RAM is huge)
+
+# ram_cap is absolute bytes (or None). Two modes only:
+#   warm            — everything in RAM; measures CPU/algorithm efficiency.
+#   ram_capped_4gb  — cgroup-capped at 4 GB with drop_caches; forces real disk I/O
+#                     for BOTH systems at the SAME literal budget (fair apples-to-apples).
+# The old cold_strict/cold_start/ram_capped_{25,50} modes are kept defined for
+# reference but are not in ACTIVE_MODES — their semantics weren't symmetric.
+
+_GB = 1024 ** 3
+MODES = {
+    "warm":            {"drop_caches": False, "warmup_queries": 1000, "ram_cap": None,     "o_direct": False},
+    "ram_capped_4gb":  {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": 4 * _GB,  "o_direct": False},
+    # deprecated / reference only:
+    "cold_strict":     {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": None,     "o_direct": True},
+    "cold_start":      {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": None,     "o_direct": False},
+    "warm_steady":     {"drop_caches": False, "warmup_queries": 2000, "ram_cap": None,     "o_direct": False},
+}
+
+ACTIVE_MODES = ["warm", "ram_capped_4gb"]
+
+# ─── Query parameter grids ───────────────────────────────────────────────────
+# TAPE: probes sweep. 256 is current io_uring queue cap; higher values need
+# the C++ change that raises/splits the submission queue (tracked separately).
+
 TAPE_PROBES = [10, 25, 50, 100, 150, 200, 256]
 
-# cache_mode: "direct"    = O_DIRECT, cold on every query (strictest cold)
-#             "drop_once" = page-cache, drop-caches once then measure (matches DiskANN "cold")
-#             "cache"     = page-cache + 1000-query warmup (steady-state warm)
-TAPE_CACHE_MODES = ["direct", "drop_once", "cache"]
+# DiskANN: L × beamwidth (keep current, plus a higher-L point for ceiling).
+DISKANN_L_SEARCH  = [10, 20, 30, 50, 75, 100, 150, 200]
+DISKANN_BEAMWIDTH = [1, 2, 4]
 
-# ---- Trial repetition ----
-# Each (algo, mode, param...) config is run TRIALS times; aggregation is done in analyze.py.
-TRIALS = 3
+# ─── Thread grid ─────────────────────────────────────────────────────────────
+# Default sweep runs single-threaded only; the run_all.py --thread-sweep flag
+# enables the wider thread grid at the best-recall operating point.
+THREADS_DEFAULT = [1]
+THREADS_SWEEP   = [1, 2, 4, 8, 16]
 
-# ---- DiskANN search grid ----
-DISKANN_L_SEARCH  = [10, 20, 30, 50, 75, 100, 150]
-DISKANN_BEAMWIDTH = [1, 2, 4, 8]
-DISKANN_CACHE_MODES = ["cold", "warm"]
+# ─── Trials / rep ────────────────────────────────────────────────────────────
+TRIALS = 1
+K      = 10          # recall@K
+K_GT   = 100         # ground truth depth
 
-# Warm mode: cache this many nodes from the graph into DRAM
-DISKANN_WARM_CACHE_NODES = 200_000
+# ─── Unified runs.csv schema ─────────────────────────────────────────────────
+RUNS_COLS = [
+    "algo", "dataset", "variant", "mode", "ram_cap_bytes",
+    "params_json",           # {"L":..,"W":..} or {"probes":..,"rerank":..}
+    "threads", "trial",
+    "recall1", "recall10", "recall100",
+    "qps", "mean_ms", "p50_ms", "p95_ms", "p99_ms", "p999_ms",
+    "bytes_read_total", "bytes_read_per_query",
+    "ios_total", "ios_per_query",
+    "simd_distance_calls", "simd_avoided",
+    "cpu_user_s", "cpu_sys_s", "peak_rss_mb", "wall_s",
+    "commit_sha",
+]
 
-# ---- Search common ----
-NUM_QUERIES = 10_000
-K           = 10   # recall@K
+BUILD_COSTS_COLS = [
+    "algo", "variant", "dataset",
+    "build_wall_s", "build_peak_rss_mb", "build_cpu_user_s", "build_cpu_sys_s",
+    "index_total_bytes", "index_files_json",
+    "commit_sha", "timestamp",
+]
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+def variant_index_dir(variant: str, dataset: str) -> str:
+    """Per-(variant,dataset) index directory under data/idx/."""
+    return os.path.join(IDX_DIR, f"{variant}__{dataset}")
+
+
+def ensure_dirs():
+    for d in (DATA_ROOT, RAW_DIR, TAPE_DATA, DISKANN_DATA, GT_DIR, IDX_DIR,
+              RESULTS_DIR, LOGS_DIR, PLOTS_DIR):
+        os.makedirs(d, exist_ok=True)
