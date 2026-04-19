@@ -18,8 +18,7 @@ TAPE_WRITER     = os.path.join(REPO_ROOT, "sift10m_code", "ram_algo_implementati
 TAPE_BENCH_SRC  = os.path.join(REPO_ROOT, "sift10m_code", "ram_algo_implementation", "benchmark_search.cpp")
 TAPE_BENCH_BIN  = os.path.join(TAPE_DATA, "benchmark_search")   # compiled binary lives in data/tape/
 
-DISKANN_BUILD   = os.path.join(REPO_ROOT, "DiskANN", "build", "apps", "build_disk_index")
-DISKANN_SEARCH  = os.path.join(REPO_ROOT, "DiskANN", "build", "apps", "search_disk_index")
+DISKANN_BENCH   = os.path.join(REPO_ROOT, "DiskANN", "target", "release", "diskann-benchmark")
 
 DISKANN_INDEX_PREFIX = os.path.join(IDX_DIR, "diskann_sift10m")
 DISKANN_BASE    = os.path.join(DISKANN_DATA, "base.fbin")
@@ -51,17 +50,6 @@ DISKANN_CACHE_MODES = ["cold", "warm"]
 
 # Warm mode: cache this many nodes from the graph into DRAM
 DISKANN_WARM_CACHE_NODES = 200_000
-
-# ---- DiskANN build params (fixed; change here to rebuild) ----
-DISKANN_BUILD_PARAMS = dict(
-    data_type="float",
-    dist_fn="l2",
-    R=64,
-    L=100,
-    B=1.0,     # search-time DRAM budget in GiB
-    M=32,      # build-time RAM ceiling in GiB
-    T=16,      # threads for building (not measured)
-)
 
 # ---- Search common ----
 NUM_QUERIES = 10_000

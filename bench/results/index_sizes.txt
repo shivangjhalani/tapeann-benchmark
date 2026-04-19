@@ -1,4 +1,4 @@
-# Index on-disk sizes (MB)  —  captured 2026-04-18 23:35:17
+# Index on-disk sizes (MB)  —  captured 2026-04-19 03:14:13
 [TAPEANN]
   index_tape.bin         1545.2 MB
   centroids.bin          4.9 MB

@@ -189,7 +189,7 @@ def make_summary(tape_df, diskann_df):
     - TAPEANN is single-threaded. DiskANN run with `-T 1` for apples-to-apples.
       DiskANN's real multi-thread QPS is significantly higher.
     - Cold runs: `sync && echo 3 > /proc/sys/vm/drop_caches` before each run.
-      TAPEANN uses `O_DIRECT`; DiskANN uses buffered libaio — both bypass warm cache.
+      TAPEANN uses `O_DIRECT`; DiskANN (Rust) uses io_uring — both bypass warm cache.
     - DiskANN recall ceiling may be <1.0 due to PQ compression at the chosen `-B` budget.
     - Ground truth computed via FAISS `IndexFlatL2` on float32 base vectors.
     - SIFT10M = first 10M vectors of BIGANN (`bigann_base.bvecs`).

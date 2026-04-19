@@ -8,8 +8,12 @@ Before running:
   1. bash bench/prep/download_data.sh
   2. python bench/prep/bvecs_to_bins.py
   3. python bench/prep/compute_gt.py
-  4. python bench/run_bench.py --build       (builds both indices)
+  4. python bench/run_bench.py --build       (builds TAPEANN index)
   5. python bench/run_bench.py               (runs all searches)
+
+DiskANN uses the Rust diskann-benchmark binary (DiskANN/target/release/diskann-benchmark).
+Build it with:
+  cd DiskANN && RUSTFLAGS="-Ctarget-cpu=x86-64-v3" cargo build --release --features disk-index -p diskann-benchmark
 
 Results written to bench/results/{tapeann,diskann}.csv
 Each run is resumable — already-complete (algo, mode, params) rows are skipped.
@@ -170,29 +174,6 @@ def build_tapeann():
     print(f"[+] tape_writer done in {time.time()-t0:.1f}s")
 
 
-def build_diskann():
-    _section("BUILD  DiskANN")
-    p = DISKANN_BUILD_PARAMS
-    os.makedirs(IDX_DIR, exist_ok=True)
-    cmd = [
-        DISKANN_BUILD,
-        "--data_type", p["data_type"],
-        "--dist_fn",   p["dist_fn"],
-        "--data_path", DISKANN_BASE,
-        "--index_path_prefix", DISKANN_INDEX_PREFIX,
-        "-R", str(p["R"]),
-        "-L", str(p["L"]),
-        "-B", str(p["B"]),
-        "-M", str(p["M"]),
-        "-T", str(p["T"]),
-    ]
-    print(f"  $ {' '.join(cmd)}\n")
-    t0 = time.time()
-    rc, _, _ = _run_streaming(cmd)
-    if rc != 0:
-        print("[!] build_disk_index failed."); sys.exit(1)
-    print(f"\n[+] DiskANN index built in {time.time()-t0:.1f}s")
-
 
 # ---- TAPEANN runner ----
 
@@ -292,51 +273,87 @@ def run_tapeann(modes):
                   f"rss={row['peak_rss_mb']} MB  wall={row['wall_s']} s")
 
 
-# ---- DiskANN runner ----
+# ---- DiskANN runner (Rust diskann-benchmark) ----
 
-def _parse_diskann_stdout(text):
-    rows = []
-    for line in text.splitlines():
-        m = re.match(
-            r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)",
-            line.strip(),
-        )
-        if m:
-            rows.append({
-                "L":        int(m.group(1)),
-                "beamwidth":int(m.group(2)),
-                "qps":      float(m.group(3)),
-                "mean_us":  float(m.group(4)),
-                "p999_us":  float(m.group(5)),
-                "mean_ios": float(m.group(6)),
-                "recall10": float(m.group(8)),
-            })
-    return rows
+import json
+import tempfile
+
+
+def _make_diskann_job(L, beamwidth, mode):
+    """Build the JSON job dict for diskann-benchmark run."""
+    num_nodes = DISKANN_WARM_CACHE_NODES if mode == "warm" else None
+    return {
+        "search_directories": [],
+        "jobs": [
+            {
+                "type": "disk-index",
+                "content": {
+                    "source": {
+                        "disk-index-source": "Load",
+                        "data_type": "float32",
+                        "load_path": DISKANN_INDEX_PREFIX,
+                    },
+                    "search_phase": {
+                        "queries":           DISKANN_QUERY,
+                        "groundtruth":       DISKANN_GT,
+                        "num_threads":       1,
+                        "beam_width":        beamwidth,
+                        "search_list":       [L],
+                        "recall_at":         K,
+                        "is_flat_search":    False,
+                        "distance":          "squared_l2",
+                        "vector_filters_file": None,
+                        "num_nodes_to_cache": num_nodes,
+                        "search_io_limit":   None,
+                    },
+                },
+            }
+        ],
+    }
+
+
+def _parse_diskann_result(result_json_path):
+    """Parse diskann-benchmark JSON output; return first search_results_per_l entry."""
+    with open(result_json_path) as f:
+        data = json.load(f)
+    # Checkpoint format: list of {input: ..., results: {build: ..., search: DiskSearchStats}}
+    if not data:
+        return None
+    search = data[0].get("results", {}).get("search")
+    if not search:
+        return None
+    rows = search.get("search_results_per_l", [])
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "qps":      float(r["qps"]),
+        "mean_us":  float(r["mean_latency"]),
+        "p999_us":  float(r["p999_latency"]),
+        "mean_ios": float(r["mean_ios"]),
+        "recall10": round(float(r["recall"]), 4),   # already 0-100 scale
+    }
 
 
 def run_diskann_single(L, beamwidth, mode, trial):
-    cache_nodes = DISKANN_WARM_CACHE_NODES if mode == "warm" else 0
-    log_path = os.path.join(LOGS_DIR,
-        f"diskann_{mode}_W{beamwidth}_L{L}_t{trial}.log")
+    log_path = os.path.join(LOGS_DIR, f"diskann_{mode}_W{beamwidth}_L{L}_t{trial}.log")
     os.makedirs(LOGS_DIR, exist_ok=True)
 
     if mode == "cold":
         drop_caches()
 
+    job = _make_diskann_job(L, beamwidth, mode)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as jf:
+        json.dump(job, jf)
+        job_path = jf.name
+
+    result_path = os.path.join(LOGS_DIR, f"diskann_{mode}_W{beamwidth}_L{L}_t{trial}_result.json")
     cmd = _wrap_time([
-        DISKANN_SEARCH,
-        "--data_type", "float",
-        "--dist_fn",   "l2",
-        "--index_path_prefix", DISKANN_INDEX_PREFIX,
-        "--query_file", DISKANN_QUERY,
-        "--gt_file",    DISKANN_GT,
-        "-K",  str(K),
-        "-L",  str(L),
-        "-W",  str(beamwidth),
-        "-T",  "1",
-        "--num_nodes_to_cache", str(cache_nodes),
-        "--result_path", os.path.join(RESULTS_DIR,
-                            f"diskann_{mode}_W{beamwidth}_L{L}_t{trial}_results"),
+        DISKANN_BENCH,
+        "run",
+        "--input-file",  job_path,
+        "--output-file", result_path,
     ])
     print(f"  $ {' '.join(cmd)}\n")
 
@@ -344,27 +361,31 @@ def run_diskann_single(L, beamwidth, mode, trial):
     rc, stdout, stderr = _run_streaming(cmd)
     wall_s = time.time() - t_start
 
+    os.unlink(job_path)
+
     with open(log_path, "w") as f:
         f.write(stdout + "\n---STDERR---\n" + stderr)
 
     if rc != 0:
-        print(f"\n  [!] DiskANN exited {rc}. Full log: {log_path}")
+        print(f"\n  [!] diskann-benchmark exited {rc}. Full log: {log_path}")
         return None
 
-    rows = _parse_diskann_stdout(stdout)
-    if not rows:
-        print(f"\n  [!] No result row parsed. Full log: {log_path}")
+    metrics = _parse_diskann_result(result_path)
+    if not metrics:
+        print(f"\n  [!] Could not parse result JSON. Full log: {log_path}")
         return None
-    row = rows[0]
-    row.update({
+
+    metrics.update({
         "algo":        "diskann",
         "mode":        mode,
+        "L":           L,
+        "beamwidth":   beamwidth,
         "trial":       trial,
         "threads":     1,
         "wall_s":      round(wall_s, 2),
         "peak_rss_mb": _parse_peak_rss_mb(stderr),
     })
-    return row
+    return metrics
 
 
 def run_diskann(modes):
@@ -456,7 +477,6 @@ def main():
 
     if args.build:
         build_tapeann()
-        build_diskann()
         return
 
     tape_modes    = (TAPE_CACHE_MODES if args.mode == "all"

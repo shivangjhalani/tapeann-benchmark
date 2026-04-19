@@ -5,9 +5,9 @@ the contribution guidelines: https://github.com/microsoft/DiskANN/blob/main/CONT
 - [ ] Does this PR have a descriptive title that could go in our release notes?
 - [ ] Does this PR add any new dependencies?
 - [ ] Does this PR modify any existing APIs?
-   - [ ] Is the change to the API backwards compatible?
+- [ ] Is the change to the API backwards compatible?
 - [ ] Should this result in any changes to our documentation, either updating existing docs or adding new ones?
- 
+
 #### Reference Issues/PRs
 <!--
 Example: Fixes #1234. See also #3456.
