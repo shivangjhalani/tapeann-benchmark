@@ -31,7 +31,11 @@ def load_tape():
     df["recall"] = df["recall10"] / 100.0
     df["latency_ms"] = df["mean_ms"]
     df["qps"] = 10_000 / (df["mean_ms"] / 1000 * 10_000)   # 10k queries / total_s
-    df["label"] = "TAPEANN " + df["mode"].map({"direct": "(cold/O_DIRECT)", "cache": "(warm/cache)"})
+    df["label"] = "TAPEANN " + df["mode"].map({
+        "direct":    "(cold/O_DIRECT)",
+        "drop_once": "(cold/drop_once)",
+        "cache":     "(warm/cache)",
+    })
     return df
 
 
@@ -163,13 +167,17 @@ def make_summary(tape_df, diskann_df):
 
     lines = ["# TAPEANN vs DiskANN — SIFT10M Benchmark Summary\n"]
 
-    for mode_pair in [("direct", "cold"), ("cache", "warm")]:
+    # drop_once matches DiskANN "cold" (both drop page cache once then measure).
+    # "direct" uses O_DIRECT on every query — stricter but a different methodology.
+    for mode_pair in [("drop_once", "cold"), ("cache", "warm")]:
         tape_mode, diskann_mode = mode_pair
         lines.append(f"\n## Cache mode: TAPEANN={tape_mode}  DiskANN={diskann_mode}\n")
 
         t = tape_df[tape_df["mode"] == tape_mode].copy()
-        d = diskann_df[diskann_df["mode"] == diskann_mode].copy()
+        # Average across trials (recall is deterministic; latency/qps are averaged)
+        t = t.groupby("probes", as_index=False)[["recall", "latency_ms", "qps"]].mean()
 
+        d = diskann_df[diskann_df["mode"] == diskann_mode].copy()
         # For DiskANN pick best (lowest latency) per recall point
         d = d.sort_values("latency_ms").drop_duplicates(subset=["recall"], keep="first")
 
@@ -188,8 +196,10 @@ def make_summary(tape_df, diskann_df):
 
     - TAPEANN is single-threaded. DiskANN run with `-T 1` for apples-to-apples.
       DiskANN's real multi-thread QPS is significantly higher.
-    - Cold runs: `sync && echo 3 > /proc/sys/vm/drop_caches` before each run.
-      TAPEANN uses `O_DIRECT`; DiskANN (Rust) uses io_uring — both bypass warm cache.
+    - Cold runs: `sync && echo 3 > /proc/sys/vm/drop_caches` before each run, then
+      queries are issued (page cache warms during the run). Both TAPEANN drop_once and
+      DiskANN cold use this methodology. TAPEANN direct (O_DIRECT every query) is shown
+      in plots for reference but is a stricter / different cold model.
     - DiskANN recall ceiling may be <1.0 due to PQ compression at the chosen `-B` budget.
     - Ground truth computed via FAISS `IndexFlatL2` on float32 base vectors.
     - SIFT10M = first 10M vectors of BIGANN (`bigann_base.bvecs`).
