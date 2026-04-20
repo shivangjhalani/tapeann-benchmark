@@ -79,12 +79,12 @@ def head_to_head_section():
             continue
         seen.add((ds, mode))
         chunks.append(f"### `{ds}` · mode=`{mode}`\n")
-        hdr = ["target", "tape achieved", "tape qps", "tape ms", "tape B/q",
-               "diskann achieved", "diskann qps", "diskann ms", "diskann B/q",
+        hdr = ["target", "tape achieved", "tape qps", "tape ms", "tape B/q (app)",
+               "diskann achieved", "diskann qps", "diskann ms", "diskann B/q (app)",
                "qps ratio (tape/diskann)"]
         lines = ["| " + " | ".join(hdr) + " |",
                  "|" + "|".join(["---"] * len(hdr)) + "|"]
-        for target in (85.0, 90.0, 95.0):
+        for target in (85.0, 90.0, 95.0, 97.0, 99.0):
             pair = by_key.get((ds, mode, target), {})
             t_row = pair.get("tape_int8")
             d_row = pair.get("diskann_uint8_pq64")
@@ -96,8 +96,8 @@ def head_to_head_section():
                 ratio = "—"
             lines.append("| " + " | ".join([
                 f"{target:.0f}",
-                t_row["achieved_recall"], t_row["qps"], t_row["mean_ms"], t_row["bytes_read_per_query"],
-                d_row["achieved_recall"], d_row["qps"], d_row["mean_ms"], d_row["bytes_read_per_query"],
+                t_row["achieved_recall"], t_row["qps"], t_row["mean_ms"], t_row["bytes_per_query_app"],
+                d_row["achieved_recall"], d_row["qps"], d_row["mean_ms"], d_row["bytes_per_query_app"],
                 ratio,
             ]) + " |")
         chunks.append("\n".join(lines))
@@ -124,12 +124,49 @@ def recall_table_section():
         chunks.append(f"### `{ds}` · mode=`{m}`\n")
         chunks.append(_md_table(rs,
             cols=["target_recall", "algo", "variant",
-                  "achieved_recall", "mean_ms", "qps",
-                  "bytes_read_per_query", "ios_per_query", "params_json"],
+                  "achieved_recall", "mean_ms", "p95_ms", "p999_ms", "qps",
+                  "bytes_per_query_app", "ios_per_query", "params_json", "n_trials"],
             headers=["target", "algo", "variant", "achieved",
-                     "latency_ms", "qps", "bytes/q", "ios/q", "params"]))
+                     "mean_ms", "p95_ms", "p999_ms", "qps",
+                     "B/q (app)", "ios/q", "params", "n"]))
         chunks.append("")
     return "\n".join(chunks)
+
+
+def thread_sweep_section():
+    """Emit a QPS-vs-threads table from aggregated.csv, filtered to rows
+    whose params match THREAD_SWEEP_PARAMS."""
+    agg_path = os.path.join(RESULTS_DIR, "aggregated.csv")
+    rows = _read_csv(agg_path)
+    if not rows:
+        return "_no aggregated.csv yet_"
+    from configs.grid import THREAD_SWEEP_PARAMS
+    wanted_by_variant = {
+        v: {json.dumps(p, sort_keys=True) for p in plist}
+        for v, plist in THREAD_SWEEP_PARAMS.items()
+    }
+    sweep = [r for r in rows
+             if r.get("variant") in wanted_by_variant
+             and r.get("params_json") in wanted_by_variant[r["variant"]]]
+    # Only show rows where threads > 1 exists (otherwise nothing to sweep)
+    thread_vals = sorted({int(r["threads"]) for r in sweep if r.get("threads")})
+    if len(thread_vals) < 2:
+        return "_no thread-sweep data — run `run_all.py --thread-sweep`_"
+
+    out = []
+    by_mode = {}
+    for r in sweep:
+        by_mode.setdefault((r["dataset"], r["mode"]), []).append(r)
+    for (ds, m), rs in by_mode.items():
+        out.append(f"### `{ds}` · mode=`{m}`\n")
+        out.append(_md_table(
+            sorted(rs, key=lambda r: (r["variant"], int(r["threads"]))),
+            cols=["variant", "threads", "params_json",
+                  "recall10_median", "mean_ms_median", "qps_median", "n_trials"],
+            headers=["variant", "threads", "params",
+                     "recall@10", "mean_ms", "qps", "n"]))
+        out.append("")
+    return "\n".join(out)
 
 
 def plots_section():
@@ -161,8 +198,13 @@ def main():
                  + head_to_head_section())
     parts.append("\n## All operating points (closest to recall target)\n"
                  + "Includes reference variants `diskann_fp32_pq64 (ref)` and "
-                 + "`diskann_uint8_pq32 (ref)`.\n\n"
+                 + "`diskann_uint8_pq32 (ref)`. "
+                 + "Each cell is the median across trials.\n\n"
                  + recall_table_section())
+    parts.append("\n## Thread scaling (DiskANN only; TAPE is single-threaded)\n"
+                 + "Fixed operating point ≈ 95% recall; threads is the only "
+                 + "varied dimension.\n\n"
+                 + thread_sweep_section())
     parts.append("\n## Pareto plots\n"     + plots_section())
     with open(OUT_MD, "w") as f:
         f.write("\n".join(parts) + "\n")

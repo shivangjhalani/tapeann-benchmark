@@ -109,12 +109,49 @@ def main():
             plot_panel(rows, ds, m, "qps_median",
                        "QPS (higher is better)", minimize_y=False,
                        fname=f"recall_vs_qps__{ds}__{m}.png")
-            # bytes_read is only meaningful when the page cache isn't serving
-            # the query — skip for unconstrained-RAM modes where it's ~0.
-            if m != "warm":
-                plot_panel(rows, ds, m, "bytes_read_per_query_median",
-                           "bytes read from disk per query (lower is better)",
-                           y_log=True,  fname=f"recall_vs_bytes__{ds}__{m}.png")
+            # App-level bytes/query is meaningful in every mode (cache-agnostic).
+            plot_panel(rows, ds, m, "bytes_per_query_app_median",
+                       "application bytes read per query (lower is better)",
+                       y_log=True,  fname=f"recall_vs_bytes__{ds}__{m}.png")
+    thread_sweep_plot(rows)
+
+
+def thread_sweep_plot(agg_rows):
+    """Plot QPS vs thread count for rows matching THREAD_SWEEP_PARAMS."""
+    from configs.grid import THREAD_SWEEP_PARAMS
+    import json as _json
+    wanted = {
+        v: {_json.dumps(p, sort_keys=True) for p in plist}
+        for v, plist in THREAD_SWEEP_PARAMS.items()
+    }
+    sweep = [r for r in agg_rows
+             if r.get("variant") in wanted
+             and r.get("params_json") in wanted[r["variant"]]]
+    if not sweep or len({int(r["threads"]) for r in sweep if r.get("threads")}) < 2:
+        return
+    by_mode = defaultdict(list)
+    for r in sweep:
+        by_mode[(r["dataset"], r["mode"])].append(r)
+    for (ds, m), rs in by_mode.items():
+        fig, ax = plt.subplots(figsize=(7, 5))
+        groups = defaultdict(list)
+        for r in rs:
+            groups[r["variant"]].append(r)
+        for v, pts in sorted(groups.items()):
+            pts = sorted(pts, key=lambda r: int(r["threads"]))
+            xs = [int(r["threads"]) for r in pts]
+            ys = [_f(r["qps_median"]) for r in pts]
+            ax.plot(xs, ys, marker=MARKERS.get(v, "x"), label=v, linewidth=1.6)
+        ax.set_xlabel("threads")
+        ax.set_ylabel("QPS (median across trials)")
+        ax.set_title(f"{ds}  |  mode={m}  |  thread scaling @ fixed op. point")
+        ax.set_xscale("log", base=2)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+        fig.tight_layout()
+        out = os.path.join(PLOTS_DIR, f"threads_vs_qps__{ds}__{m}.png")
+        fig.savefig(out, dpi=140); plt.close(fig)
+        print(f"  → {out}")
 
 
 if __name__ == "__main__":

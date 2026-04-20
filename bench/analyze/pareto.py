@@ -24,7 +24,8 @@ from configs.grid import RUNS_CSV, RESULTS_DIR, ACTIVE_MODES
 
 
 AGG_COLS = ("recall10", "mean_ms", "qps",
-            "bytes_read_per_query", "ios_per_query", "p99_ms")
+            "bytes_read_per_query", "bytes_per_query_app",
+            "ios_per_query", "p95_ms", "p99_ms", "p999_ms")
 
 
 def _to_float(x):
@@ -79,7 +80,7 @@ def aggregate(rows):
 
 
 def pareto_frontier(points, maximize=("recall10_median",),
-                    minimize=("mean_ms_median", "bytes_read_per_query_median")):
+                    minimize=("mean_ms_median", "bytes_per_query_app_median")):
     """Return subset of points not dominated. A point p dominates q iff
     p is >= on all maximize cols and <= on all minimize cols, with
     strict improvement in at least one."""
@@ -119,7 +120,7 @@ def frontier_per_group(aggregated):
     return out
 
 
-def closest_recall_table(aggregated, targets=(85.0, 90.0, 95.0)):
+def closest_recall_table(aggregated, targets=(85.0, 90.0, 95.0, 97.0, 99.0)):
     """For each (algo, variant, mode, ram_cap) group, pick the single
     operating point whose recall is closest to each target."""
     by_group = defaultdict(list)
@@ -146,8 +147,13 @@ def closest_recall_table(aggregated, targets=(85.0, 90.0, 95.0)):
                     "params_json": best["params_json"],
                     "mean_ms": best["mean_ms_median"],
                     "qps": best["qps_median"],
+                    "p95_ms": best.get("p95_ms_median", ""),
+                    "p99_ms": best.get("p99_ms_median", ""),
+                    "p999_ms": best.get("p999_ms_median", ""),
                     "bytes_read_per_query": best["bytes_read_per_query_median"],
+                    "bytes_per_query_app": best["bytes_per_query_app_median"],
                     "ios_per_query": best["ios_per_query_median"],
+                    "n_trials": best["n_trials"],
                     "distance_to_target": round(best_d, 3),
                 })
     return rows

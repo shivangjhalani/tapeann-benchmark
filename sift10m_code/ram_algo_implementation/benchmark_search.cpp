@@ -180,8 +180,10 @@ int main(int argc, char* argv[]) {
             no_warmup = true;
         } else if (arg == "--probes" && i + 1 < argc) {
             probes = std::stoi(argv[++i]);
-            if (probes < 1 || probes > 256) {
-                std::cerr << "[!] --probes must be 1..256 (io_uring queue depth limit)\n";
+            // Upper bound = total cluster count (10000). io_uring depth is sized
+            // dynamically below, so the old 256 cap is gone.
+            if (probes < 1 || probes > 10000) {
+                std::cerr << "[!] --probes must be 1..10000\n";
                 return 1;
             }
         }
@@ -269,21 +271,35 @@ int main(int argc, char* argv[]) {
     // standard ring (which still batches completions better than
     // the old one-at-a-time wait loop).
     // ============================================================
+    // Ring depth must be ≥ probes so a whole query's batch fits without
+    // a mid-submit drain. Round probes up to the next power of two; io_uring
+    // requires power-of-two depth. Clamp to [64, 16384].
+    auto next_pow2 = [](unsigned v) -> unsigned {
+        unsigned p = 1;
+        while (p < v) p <<= 1;
+        return p;
+    };
+    unsigned ring_depth = next_pow2(std::max(64, probes));
+    if (ring_depth > 16384) ring_depth = 16384;
+
     struct io_uring ring;
     struct io_uring_params params = {};
     params.flags = IORING_SETUP_SQPOLL;
     params.sq_thread_idle = 2000; // kernel SQ thread idles for 2s before sleeping
 
     bool sqpoll_active = false;
-    if (io_uring_queue_init_params(256, &ring, &params) == 0) {
+    if (io_uring_queue_init_params(ring_depth, &ring, &params) == 0) {
         sqpoll_active = true;
-        std::cout << "[+] io_uring SQPOLL active — zero-syscall submission enabled.\n";
+        std::cout << "[+] io_uring SQPOLL active (depth=" << ring_depth
+                  << ") — zero-syscall submission enabled.\n";
     } else {
         // Fallback: standard ring, still uses batched CQE draining
-        if (io_uring_queue_init(256, &ring, 0) < 0) {
-            std::cerr << "[!] Failed to initialize io_uring\n"; return 1;
+        if (io_uring_queue_init(ring_depth, &ring, 0) < 0) {
+            std::cerr << "[!] Failed to initialize io_uring (depth=" << ring_depth << ")\n";
+            return 1;
         }
-        std::cout << "[+] io_uring standard mode (SQPOLL unavailable — try sudo or CAP_SYS_ADMIN).\n";
+        std::cout << "[+] io_uring standard mode (depth=" << ring_depth
+                  << ", SQPOLL unavailable — try sudo or CAP_SYS_ADMIN).\n";
     }
     (void)sqpoll_active;
 
@@ -325,6 +341,7 @@ int main(int argc, char* argv[]) {
     double    total_latency_ms   = 0.0;
     long long total_simd_avoided = 0;
     long long total_ios          = 0;
+    long long total_bytes_read   = 0;  // sum of info.length_bytes across all probed clusters
     std::vector<double> query_latencies(num_queries);
 
     std::vector<ClusterInfo*> active_infos(probes);
@@ -370,6 +387,7 @@ int main(int argc, char* argv[]) {
                 active_infos[i]->length_bytes,
                 active_infos[i]->byte_offset);
             io_uring_sqe_set_data(sqe, (void*)(uintptr_t)i);
+            total_bytes_read += (long long)active_infos[i]->length_bytes;
         }
         io_uring_submit(&ring);
         total_ios += probes;
@@ -449,6 +467,7 @@ int main(int argc, char* argv[]) {
     double recall1_pct = (total_recall1 / num_queries) * 100.0;
     double qps         = 1000.0 / mean_ms;
     double ios_per_q   = (double)total_ios / num_queries;
+    double bytes_per_q = (double)total_bytes_read / num_queries;
     double p50  = percentile(50);
     double p95  = percentile(95);
     double p99  = percentile(99);
@@ -469,11 +488,13 @@ int main(int argc, char* argv[]) {
     std::cout << "Recall@1         : " << recall1_pct << " %\n";
     std::cout << "QPS (1 thread)   : " << qps << "\n";
     std::cout << "IOs per query    : " << ios_per_q << "\n";
+    std::cout << "Bytes per query  : " << bytes_per_q << "\n";
     std::cout << "SIMD Calcs Saved : " << total_simd_avoided << " vectors skipped!\n";
     std::cout << "=========================================\n";
 
     // Machine-readable CSV line (grep for ^CSV: to extract)
-    // Schema v2: algo,probes,recall10,recall1,qps,mean_ms,p50,p95,p99,p999,ios_per_q,simd_avoided
+    // Schema v3: algo,probes,<probes>,recall10,recall1,qps,mean_ms,
+    //            p50,p95,p99,p999,ios_per_q,bytes_per_q,simd_avoided
     std::cout << std::fixed << std::setprecision(4);
     std::cout << "CSV:tapeann,probes," << probes
               << "," << recall_pct
@@ -485,6 +506,7 @@ int main(int argc, char* argv[]) {
               << "," << p99
               << "," << p999
               << "," << ios_per_q
+              << "," << bytes_per_q
               << "," << total_simd_avoided
               << "\n";
 

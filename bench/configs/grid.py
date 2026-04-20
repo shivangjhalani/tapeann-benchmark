@@ -159,34 +159,45 @@ ACTIVE_VARIANTS = [
 
 _GB = 1024 ** 3
 MODES = {
-    "warm":            {"drop_caches": False, "warmup_queries": 1000, "ram_cap": None,     "o_direct": False},
-    "ram_capped_4gb":  {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": 4 * _GB,  "o_direct": False},
-    # deprecated / reference only:
-    "cold_strict":     {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": None,     "o_direct": True},
-    "cold_start":      {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": None,     "o_direct": False},
-    "warm_steady":     {"drop_caches": False, "warmup_queries": 2000, "ram_cap": None,     "o_direct": False},
+    "warm":              {"drop_caches": False, "warmup_queries": 1000, "ram_cap": None,             "o_direct": False},
+    # 1.5 GB cap forces BOTH indices to page: tape_int8 is ~1.67 GB, DiskANN
+    # uint8_pq64 is ~6.8 GB — so neither fits entirely in the cap.
+    "ram_capped_1p5gb":  {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": (3 * _GB) // 2,   "o_direct": False},
 }
 
-ACTIVE_MODES = ["warm", "ram_capped_4gb"]
+ACTIVE_MODES = ["warm", "ram_capped_1p5gb"]
 
 # ─── Query parameter grids ───────────────────────────────────────────────────
-# TAPE: probes sweep. 256 is current io_uring queue cap; higher values need
-# the C++ change that raises/splits the submission queue (tracked separately).
+# TAPE: probes sweep. The C++ binary now sizes the io_uring ring dynamically
+# from `probes`, so the old 256 cap is gone. 1000 probes ≈ 10% of clusters;
+# that's enough to push recall past 99%.
 
-TAPE_PROBES = [10, 25, 50, 100, 150, 200, 256]
+TAPE_PROBES = [10, 15, 20, 25, 30, 35, 40, 50, 70, 100, 150, 200, 300, 500, 750, 1000]
 
-# DiskANN: L × beamwidth (keep current, plus a higher-L point for ceiling).
-DISKANN_L_SEARCH  = [10, 20, 30, 50, 75, 100, 150, 200]
+# DiskANN: L × beamwidth. Added L=300 for ≥99% recall headroom.
+DISKANN_L_SEARCH  = [10, 20, 30, 50, 75, 100, 150, 200, 300]
 DISKANN_BEAMWIDTH = [1, 2, 4]
 
 # ─── Thread grid ─────────────────────────────────────────────────────────────
 # Default sweep runs single-threaded only; the run_all.py --thread-sweep flag
-# enables the wider thread grid at the best-recall operating point.
+# enables the wider thread grid at a canonical operating point per variant.
 THREADS_DEFAULT = [1]
 THREADS_SWEEP   = [1, 2, 4, 8, 16]
 
+# Canonical (~95% recall) operating points used by --thread-sweep. Keeps the
+# thread-scaling experiment to a tractable size instead of re-running the full
+# param grid at every thread count.
+# tape_int8 is intentionally absent: benchmark_search.cpp is single-threaded
+# (one io_uring + one scorer), so threads > 1 would reproduce the same number.
+# The thread sweep measures DiskANN's scaling at a fixed ~95% recall point.
+THREAD_SWEEP_PARAMS = {
+    "diskann_uint8_pq64":  [{"L": 30, "W": 4}],
+    "diskann_fp32_pq64":   [{"L": 30, "W": 4}],
+    "diskann_uint8_pq32":  [{"L": 30, "W": 4}],
+}
+
 # ─── Trials / rep ────────────────────────────────────────────────────────────
-TRIALS = 1
+TRIALS = 3
 K      = 10          # recall@K
 K_GT   = 100         # ground truth depth
 
@@ -197,7 +208,12 @@ RUNS_COLS = [
     "threads", "trial",
     "recall1", "recall10", "recall100",
     "qps", "mean_ms", "p50_ms", "p95_ms", "p99_ms", "p999_ms",
-    "bytes_read_total", "bytes_read_per_query",
+    # bytes_read_* come from /proc/{pid}/io (bytes that actually hit the block
+    # layer — legitimately 0 when the page cache served the request).
+    # bytes_per_query_app is the application-requested byte budget (sum of
+    # read lengths the algorithm asked for). The "fair" bytes/query metric
+    # for cross-system comparison.
+    "bytes_read_total", "bytes_read_per_query", "bytes_per_query_app",
     "ios_total", "ios_per_query",
     "simd_distance_calls", "simd_avoided",
     "cpu_user_s", "cpu_sys_s", "peak_rss_mb", "wall_s",

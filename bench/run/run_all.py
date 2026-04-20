@@ -37,10 +37,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from configs.grid import (
     DATASETS, DISKANN_VARIANTS, TAPE_VARIANTS, MODES, ACTIVE_MODES,
     ACTIVE_VARIANTS, ACTIVE_DATASETS, TAPE_PROBES, DISKANN_L_SEARCH,
-    DISKANN_BEAMWIDTH, THREADS_DEFAULT, TRIALS, K,
+    DISKANN_BEAMWIDTH, THREADS_DEFAULT, THREADS_SWEEP, THREAD_SWEEP_PARAMS,
+    TRIALS, K,
     DISKANN_BENCH, GT_DIR, DISKANN_DATA, LOGS_DIR,
     variant_index_dir,
 )
+
+# DiskANN reads one 4 KB sector per IO. Used to estimate the application-level
+# bytes/query (comparable to TAPE's bytes_per_query_app, which the binary
+# emits directly).
+DISKANN_SECTOR_BYTES = 4096
 from run.runner_common import (
     drop_caches, wrap_time, wrap_ram_cap, run_measured,
     load_done_keys, make_resume_key, append_run_row,
@@ -58,23 +64,25 @@ def compute_ram_cap_bytes(mode_cfg: dict, idx_dir: str, algo: str) -> int | None
 # ─── TAPE runner ────────────────────────────────────────────────────────────
 
 def _parse_tape_csv(stdout: str):
-    # CSV line emitted by benchmark_search.cpp:
-    #   CSV:tapeann,probes,<probes>,recall10,recall1,qps,mean_ms,p50,p95,p99,p999,ios_per_q,simd_avoided
+    # CSV line emitted by benchmark_search.cpp (schema v3):
+    #   CSV:tapeann,probes,<probes>,recall10,recall1,qps,mean_ms,
+    #       p50,p95,p99,p999,ios_per_q,bytes_per_q,simd_avoided
     for line in stdout.splitlines():
         if line.startswith("CSV:tapeann,probes,"):
             p = line.split(",")
-            if len(p) < 13: return None
+            if len(p) < 14: return None
             return {
-                "recall10":      float(p[3]),
-                "recall1":       float(p[4]),
-                "qps":           float(p[5]),
-                "mean_ms":       float(p[6]),
-                "p50_ms":        float(p[7]),
-                "p95_ms":        float(p[8]),
-                "p99_ms":        float(p[9]),
-                "p999_ms":       float(p[10]),
-                "ios_per_query": float(p[11]),
-                "simd_avoided":  int(p[12]),
+                "recall10":            float(p[3]),
+                "recall1":             float(p[4]),
+                "qps":                 float(p[5]),
+                "mean_ms":             float(p[6]),
+                "p50_ms":              float(p[7]),
+                "p95_ms":              float(p[8]),
+                "p99_ms":              float(p[9]),
+                "p999_ms":             float(p[10]),
+                "ios_per_query":       float(p[11]),
+                "bytes_per_query_app": float(p[12]),
+                "simd_avoided":        int(p[13]),
             }
     return None
 
@@ -129,6 +137,7 @@ def run_tape_one(variant, dataset, mode, probes, trial, ram_cap_bytes, threads):
         "p999_ms":   metrics["p999_ms"],
         "bytes_read_total":       res["bytes_read_total"],
         "bytes_read_per_query":   round(res["bytes_read_total"] / 10_000, 1),
+        "bytes_per_query_app":    round(metrics["bytes_per_query_app"], 1),
         "ios_total":              res["ios_total"],
         "ios_per_query":          metrics["ios_per_query"],
         "simd_distance_calls":    "",
@@ -187,10 +196,13 @@ def _parse_diskann_result(result_json):
     rows = s.get("search_results_per_l", [])
     if not rows: return None
     r = rows[0]
+    # diskann-benchmark reports p95 and p999 in microseconds. p50/p99 aren't
+    # emitted by that binary — we leave those blank in runs.csv.
     return {
         "qps":           float(r["qps"]),
         "mean_ms":       float(r["mean_latency"]) / 1000.0,
-        "p999_ms":       float(r["p999_latency"]) / 1000.0,
+        "p95_ms":        (float(r["p95_latency"])  / 1000.0) if "p95_latency"  in r else "",
+        "p999_ms":       (float(r["p999_latency"]) / 1000.0) if "p999_latency" in r else "",
         "ios_per_query": float(r["mean_ios"]),
         "recall10":      round(float(r["recall"]), 4),
     }
@@ -238,10 +250,16 @@ def run_diskann_one(variant, dataset, mode, L, W, trial, ram_cap_bytes, threads)
         "recall1": "",  "recall10": m["recall10"],  "recall100": "",
         "qps":       m["qps"],
         "mean_ms":   m["mean_ms"],
-        "p50_ms":    "", "p95_ms": "", "p99_ms": "",
+        "p50_ms":    "",
+        "p95_ms":    m["p95_ms"],
+        "p99_ms":    "",
         "p999_ms":   m["p999_ms"],
         "bytes_read_total":       res["bytes_read_total"],
         "bytes_read_per_query":   round(res["bytes_read_total"] / 10_000, 1),
+        # DiskANN reads one 4 KB sector per IO; app-level bytes/query is
+        # therefore mean_ios * 4096. Same semantic as TAPE's directly-emitted
+        # bytes_per_query_app so the two are comparable.
+        "bytes_per_query_app":    round(m["ios_per_query"] * DISKANN_SECTOR_BYTES, 1),
         "ios_total":              res["ios_total"],
         "ios_per_query":          m["ios_per_query"],
         "simd_distance_calls":    "",  "simd_avoided": "",
@@ -255,38 +273,43 @@ def run_diskann_one(variant, dataset, mode, L, W, trial, ram_cap_bytes, threads)
 
 # ─── Matrix generator ───────────────────────────────────────────────────────
 
-def iter_jobs(datasets, variants, modes, threads_list, trials):
-    """Yield dicts describing every pending (or all, caller filters) job."""
+def iter_jobs(datasets, variants, modes, threads_list, trials,
+              thread_sweep=False):
+    """Yield dicts describing every pending (or all, caller filters) job.
+
+    When thread_sweep=True, the param grid is replaced by THREAD_SWEEP_PARAMS
+    (one canonical operating point per variant) and threads_list is expected
+    to be THREADS_SWEEP — isolating the effect of thread count on QPS."""
     for ds in datasets:
         for v in variants:
             algo = "tapeann" if v in TAPE_VARIANTS else "diskann"
             idx_dir = variant_index_dir(v, ds)
+
+            if thread_sweep:
+                params_list = THREAD_SWEEP_PARAMS.get(v, [])
+                if not params_list:
+                    continue
+            else:
+                if algo == "tapeann":
+                    params_list = [{"probes": p} for p in TAPE_PROBES]
+                else:
+                    params_list = [{"L": L, "W": W}
+                                   for L in DISKANN_L_SEARCH
+                                   for W in DISKANN_BEAMWIDTH]
+
             for m in modes:
                 mcfg = MODES[m]
                 ram_cap = compute_ram_cap_bytes(mcfg, idx_dir, algo)
-                if algo == "tapeann":
-                    for probes in TAPE_PROBES:
-                        for t in range(1, trials + 1):
-                            for th in threads_list:
-                                yield {
-                                    "algo": algo, "dataset": ds, "variant": v,
-                                    "mode": m, "ram_cap_bytes": ram_cap or "",
-                                    "params_json": json.dumps({"probes": probes}, sort_keys=True),
-                                    "threads": th, "trial": t,
-                                    "_params": {"probes": probes},
-                                }
-                else:
-                    for L in DISKANN_L_SEARCH:
-                        for W in DISKANN_BEAMWIDTH:
-                            for t in range(1, trials + 1):
-                                for th in threads_list:
-                                    yield {
-                                        "algo": algo, "dataset": ds, "variant": v,
-                                        "mode": m, "ram_cap_bytes": ram_cap or "",
-                                        "params_json": json.dumps({"L": L, "W": W}, sort_keys=True),
-                                        "threads": th, "trial": t,
-                                        "_params": {"L": L, "W": W},
-                                    }
+                for pdict in params_list:
+                    for t in range(1, trials + 1):
+                        for th in threads_list:
+                            yield {
+                                "algo": algo, "dataset": ds, "variant": v,
+                                "mode": m, "ram_cap_bytes": ram_cap or "",
+                                "params_json": json.dumps(pdict, sort_keys=True),
+                                "threads": th, "trial": t,
+                                "_params": pdict,
+                            }
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────
@@ -300,11 +323,21 @@ def main():
     ap.add_argument("--trials",   type=int,  default=TRIALS)
     ap.add_argument("--dry-run",  action="store_true")
     ap.add_argument("--limit",    type=int,  default=None)
+    ap.add_argument("--thread-sweep", action="store_true",
+                    help="Restrict to THREAD_SWEEP_PARAMS operating points and "
+                         "sweep over THREADS_SWEEP thread counts.")
     args = ap.parse_args()
+
+    if args.thread_sweep:
+        # Override: ignore the param grid, use THREAD_SWEEP_PARAMS, and
+        # force the thread list to THREADS_SWEEP unless user passed explicit threads.
+        if args.threads == THREADS_DEFAULT:
+            args.threads = THREADS_SWEEP
 
     done = load_done_keys()
     all_jobs   = list(iter_jobs(args.datasets, args.variants, args.modes,
-                                args.threads, args.trials))
+                                args.threads, args.trials,
+                                thread_sweep=args.thread_sweep))
     pending = [j for j in all_jobs
                if make_resume_key(j) not in done]
 
