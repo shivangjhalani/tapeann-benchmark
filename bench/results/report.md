@@ -184,3 +184,17 @@ _no thread-sweep data — run `run_all.py --thread-sweep`_
 ![recall_vs_qps__sift10m__ram_capped_1p5gb.png](plots/recall_vs_qps__sift10m__ram_capped_1p5gb.png)
 
 ![recall_vs_qps__sift10m__warm.png](plots/recall_vs_qps__sift10m__warm.png)
+
+## Major Takeaways
+
+1. **TapeANN wins at 85–90% and 97% recall.** The clearest advantage is at 90% recall where TapeANN is ~1.9× faster than DiskANN (uint8_pq64) in both warm and RAM-capped modes.
+
+2. **95% recall is a regression.** TapeANN loses to DiskANN at 95% (0.52–0.57×) despite beating it just below (90%) and above (97%). The jump from 30→70 probes is disproportionately costly relative to the recall gain, suggesting a probe-count cliff around this operating point.
+
+3. **99% recall is a cliff.** TapeANN needs 1000 probes to reach ~98.9% recall, yielding only 13–36 QPS — 14–37× slower than DiskANN at the same target. High-recall workloads are not viable with the current probe-based search.
+
+4. **I/O amplification scales badly.** TapeANN reads 3.6 MB/query at 85% recall vs DiskANN's 125 KB — already 29× more. At 99% recall this blows out to 157 MB/query (420×). This is the root cause of the 99%-recall collapse and will likely dominate in any storage-bound deployment.
+
+5. **RAM-capped penalty is small for TapeANN, larger for DiskANN.** TapeANN QPS drops ~20–60% under the 1.5 GB cap vs warm; DiskANN drops ~35–50%. TapeANN's working set is more cache-friendly at low probe counts.
+
+6. **Single-threaded limitation.** All TapeANN numbers are single-threaded. DiskANN thread-scaling data was not collected, so the QPS ratios above represent a ceiling for TapeANN — a multi-threaded DiskANN would widen the gap at every recall target.
