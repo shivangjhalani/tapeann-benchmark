@@ -44,16 +44,26 @@ def group_by(rows, *keys):
 
 
 def envelope(points, x_key, y_key, minimize_y=True):
-    """Keep only Pareto-optimal (x desc, y asc if minimize else desc)."""
+    """Return Pareto-optimal (x, y) pairs: higher x is always better; y is
+    better when lower (minimize_y=True) or higher (minimize_y=False).
+
+    A point is kept iff no other point has both higher-or-equal x AND
+    better-or-equal y.  Algorithm: sort by x descending and keep each point
+    whose y is at least as good as the best y seen so far among higher-x
+    points — equivalent to sweeping from the high-recall end and keeping
+    points that improve the performance frontier."""
     pts = [(p, _f(p[x_key]), _f(p[y_key])) for p in points]
     pts = [(p, x, y) for (p, x, y) in pts if x is not None and y is not None]
-    pts.sort(key=lambda t: (t[1], t[2] if minimize_y else -t[2]))
+    if not pts:
+        return []
+    pts.sort(key=lambda t: (-t[1], t[2] if minimize_y else -t[2]))
     out = []
     best = None
     for _, x, y in pts:
-        if best is None or (minimize_y and y < best) or (not minimize_y and y > best):
+        if best is None or (minimize_y and y <= best) or (not minimize_y and y >= best):
             out.append((x, y))
             best = y
+    out.sort()
     return out
 
 
