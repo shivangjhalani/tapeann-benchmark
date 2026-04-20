@@ -109,18 +109,23 @@ def main():
     if not rows:
         print("no aggregated.csv — run pareto.py first.")
         return
-    datasets = sorted({r["dataset"] for r in rows})
-    modes    = sorted({r["mode"] for r in rows})
+    # Recall-curve plots: single-threaded only so the DiskANN thread-sweep
+    # rows (which reach ~8000 QPS at one canonical recall point) don't
+    # dominate and collapse the full recall curve. Thread scaling has its
+    # own dedicated plot below.
+    single = [r for r in rows if str(r.get("threads", "1")) == "1"]
+    datasets = sorted({r["dataset"] for r in single})
+    modes    = sorted({r["mode"] for r in single})
     for ds in datasets:
         for m in modes:
-            plot_panel(rows, ds, m, "mean_ms_median",
+            plot_panel(single, ds, m, "mean_ms_median",
                        "mean latency (ms, lower is better)",
                        y_log=True,  fname=f"recall_vs_latency__{ds}__{m}.png")
-            plot_panel(rows, ds, m, "qps_median",
+            plot_panel(single, ds, m, "qps_median",
                        "QPS (higher is better)", minimize_y=False,
                        fname=f"recall_vs_qps__{ds}__{m}.png")
             # App-level bytes/query is meaningful in every mode (cache-agnostic).
-            plot_panel(rows, ds, m, "bytes_per_query_app_median",
+            plot_panel(single, ds, m, "bytes_per_query_app_median",
                        "application bytes read per query (lower is better)",
                        y_log=True,  fname=f"recall_vs_bytes__{ds}__{m}.png")
     thread_sweep_plot(rows)
