@@ -57,11 +57,15 @@ def build_cost_section():
 def head_to_head_section():
     """Matched-bytes headline: tape_int8 vs diskann_uint8_pq64 only.
     One sub-table per (dataset, mode); rows = recall targets; columns =
-    (target, tape recall/qps/ms/bytes, diskann recall/qps/ms/bytes, qps_ratio)."""
+    (target, tape recall/qps/ms/bytes, diskann recall/qps/ms/bytes, qps_ratio).
+    Always uses threads=1 for both sides so the comparison is apples-to-apples."""
     rows = _read_csv(CLOSEST_CSV)
     if not rows:
         return "_no closest_recall.csv yet — run pareto.py_"
     rows = [r for r in rows if r["mode"] in ACTIVE_MODES]
+    # Restrict to single-threaded results only so DiskANN's multi-thread sweep
+    # data doesn't inflate its QPS relative to TapeANN's always-single-threaded runs.
+    rows = [r for r in rows if str(r.get("threads", "1")) == "1"]
     want = {(a, v) for (a, v) in HEADLINE_PAIR}
     rows = [r for r in rows if (r["algo"], r["variant"]) in want]
     if not rows:
@@ -110,6 +114,10 @@ def recall_table_section():
     if not rows:
         return "_no closest_recall.csv yet — run pareto.py_"
     rows = [r for r in rows if r["mode"] in ACTIVE_MODES]
+    # Only show single-threaded results here; multi-thread scaling is in the
+    # thread-sweep section, and duplicate rows (one per thread count) for the
+    # same recall target are confusing when the threads column isn't shown.
+    rows = [r for r in rows if str(r.get("threads", "1")) == "1"]
     for r in rows:
         if r["variant"] in REFERENCE_VARIANTS:
             r["variant"] = r["variant"] + " (ref)"
@@ -169,6 +177,64 @@ def thread_sweep_section():
     return "\n".join(out)
 
 
+TAKEAWAYS = """\
+> Numbers below compare TapeANN (single-threaded) against single-threaded \
+DiskANN `uint8_pq64` unless noted. Multi-thread DiskANN numbers are in the \
+thread-scaling section.
+
+**1. TapeANN wins at 85–90 % and 97 % recall (1-thread comparison).**
+At 90 % recall TapeANN is ~1.9–2× faster than 1-thread DiskANN across all \
+modes (warm, 1.5 GB cap, 3 GB cap). It also leads at 85 % (~1.05–1.25×) and \
+97 % (~1.12–1.24×).
+
+**2. 95 % recall is a consistent crossover loss.**
+TapeANN loses to DiskANN at 95 % in every mode (~0.54–0.63×). The jump from \
+30 probes (90 % target) to 60 probes (95 % target) halves QPS while adding \
+only 5 recall points — a probe-count cliff that is the main weak spot in the \
+recall curve.
+
+**3. 99 % recall is a collapse.**
+TapeANN needs 1000 probes to reach ~98.9 % recall: 13 QPS (1.5 GB cap), \
+29 QPS (3 GB cap), 36 QPS (warm). DiskANN achieves the same recall at \
+417–495 QPS (1-thread) — 15–38× faster. High-recall workloads are not viable \
+with the current probe mechanism.
+
+**4. RAM cap matters significantly for TapeANN at high probe counts.**
+Going from 1.5 GB → 3 GB, TapeANN at 99 % recall improves from 13 → 29 QPS \
+(+2.2×); at 95 % from 428 → 460 QPS (+7 %). At 85–90 % the two caps are \
+nearly equivalent. DiskANN sees minimal change across caps. TapeANN's large \
+I/O footprint (157 MB/query at 1000 probes) makes it highly sensitive to page \
+cache size at high probe counts.
+
+**5. I/O amplification is extreme and worsens rapidly with probes.**
+TapeANN reads ~3.6 MB/query at 85 % recall vs DiskANN's 125 KB (29×); at \
+99 % this is 157 MB/query (420×). This is the root cause of the 99 %-recall \
+collapse and limits viability in storage-bound deployments.
+
+**6. DiskANN multi-threading changes the picture entirely.**
+At 16 threads DiskANN reaches 8073 QPS warm (95 % recall) vs TapeANN's \
+516 QPS — a 15.6× gap. At 1 thread DiskANN is only 1.85× ahead (953 vs 516). \
+Threading is the dominant factor: a multi-threaded DiskANN deployment dominates \
+TapeANN at every recall target.
+
+**7. "Higher recall = lower latency" in the plots is expected and not a contradiction.**
+The recall-vs-latency and recall-vs-QPS curves show latency *decreasing* as recall \
+increases over certain ranges. This happens because the plots sweep across multiple \
+(L, W) parameter pairs, not just L at fixed W. Configurations with low beamwidth \
+(W=1) and low L land at low recall but high latency — beam search with W=1 is \
+sequential and cache-unfriendly. Configurations with high beamwidth (W=4) at \
+slightly higher L reach better recall with *lower* latency because the 4 parallel \
+beams amortize memory access costs more efficiently. The downward-sloping segment \
+of a curve therefore represents dominated operating points — configurations that \
+are both slower *and* less accurate than a nearby W=4 point. In practice, only \
+the rightmost (Pareto-optimal) end of each curve should be used.
+"""
+
+
+def takeaways_section():
+    return TAKEAWAYS
+
+
 def plots_section():
     if not os.path.isdir(PLOTS_DIR):
         return "_no plots/_"
@@ -207,6 +273,7 @@ def main():
                  + "relative to TapeANN's single-threaded baseline.\n\n"
                  + thread_sweep_section())
     parts.append("\n## Pareto plots\n"     + plots_section())
+    parts.append("\n## Takeaways\n"        + takeaways_section())
     with open(OUT_MD, "w") as f:
         f.write("\n".join(parts) + "\n")
     print(f"→ {OUT_MD}")
