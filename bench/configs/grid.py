@@ -163,16 +163,21 @@ MODES = {
     # 1.5 GB cap forces BOTH indices to page: tape_int8 is ~1.67 GB, DiskANN
     # uint8_pq64 is ~6.8 GB — so neither fits entirely in the cap.
     "ram_capped_1p5gb":  {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": (3 * _GB) // 2,   "o_direct": False},
+    # 3 GB cap: tape_int8 (~1.67 GB) fits entirely; DiskANN uint8_pq64 (~6.8 GB)
+    # still must page. Isolates the effect of TapeANN's smaller index footprint —
+    # if TapeANN wins here it can't be attributed to I/O; if DiskANN still beats
+    # it at high recall, the gap is algorithmic, not storage-bound.
+    "ram_capped_3gb":    {"drop_caches": True,  "warmup_queries": 0,    "ram_cap": 3 * _GB,          "o_direct": False},
 }
 
-ACTIVE_MODES = ["warm", "ram_capped_1p5gb"]
+ACTIVE_MODES = ["warm", "ram_capped_1p5gb", "ram_capped_3gb"]
 
 # ─── Query parameter grids ───────────────────────────────────────────────────
 # TAPE: probes sweep. The C++ binary now sizes the io_uring ring dynamically
 # from `probes`, so the old 256 cap is gone. 1000 probes ≈ 10% of clusters;
 # that's enough to push recall past 99%.
 
-TAPE_PROBES = [10, 15, 20, 25, 30, 35, 40, 50, 70, 100, 150, 200, 300, 500, 750, 1000]
+TAPE_PROBES = [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 80, 90, 100, 150, 200, 300, 500, 750, 1000]
 
 # DiskANN: L × beamwidth. Added L=300 for ≥99% recall headroom.
 DISKANN_L_SEARCH  = [10, 20, 30, 50, 75, 100, 150, 200, 300]

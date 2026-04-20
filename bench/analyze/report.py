@@ -201,9 +201,10 @@ def main():
                  + "`diskann_uint8_pq32 (ref)`. "
                  + "Each cell is the median across trials.\n\n"
                  + recall_table_section())
-    parts.append("\n## Thread scaling (DiskANN only; TAPE is single-threaded)\n"
+    parts.append("\n## Thread scaling (DiskANN; TapeANN is single-threaded)\n"
                  + "Fixed operating point ≈ 95% recall; threads is the only "
-                 + "varied dimension.\n\n"
+                 + "varied dimension. Shows DiskANN's multi-core throughput scaling "
+                 + "relative to TapeANN's single-threaded baseline.\n\n"
                  + thread_sweep_section())
     parts.append("\n## Pareto plots\n"     + plots_section())
     with open(OUT_MD, "w") as f:

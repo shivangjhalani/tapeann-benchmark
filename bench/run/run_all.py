@@ -312,6 +312,28 @@ def iter_jobs(datasets, variants, modes, threads_list, trials,
                             }
 
 
+# ─── Analysis pipeline ──────────────────────────────────────────────────────
+
+def _run_analysis():
+    """Re-generate aggregated CSVs, plots, and report after a benchmark run."""
+    import importlib.util, subprocess
+
+    analyze_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "analyze")
+    for script in ("pareto.py", "plots.py", "report.py"):
+        path = os.path.join(analyze_dir, script)
+        if not os.path.exists(path):
+            print(f"  [analysis] {script} not found, skipping")
+            continue
+        print(f"  [analysis] running {script} …")
+        result = subprocess.run([sys.executable, path], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  [!] {script} failed:\n{result.stderr[-2000:]}")
+        else:
+            if result.stdout.strip():
+                print(result.stdout.strip())
+
+
 # ─── Main ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -325,23 +347,53 @@ def main():
     ap.add_argument("--limit",    type=int,  default=None)
     ap.add_argument("--thread-sweep", action="store_true",
                     help="Restrict to THREAD_SWEEP_PARAMS operating points and "
-                         "sweep over THREADS_SWEEP thread counts.")
+                         "sweep over THREADS_SWEEP thread counts (also runs automatically "
+                         "as phase 2 of the default run).")
+    ap.add_argument("--no-analysis", action="store_true",
+                    help="Skip the pareto/plots/report regeneration step at the end.")
     args = ap.parse_args()
 
     if args.thread_sweep:
-        # Override: ignore the param grid, use THREAD_SWEEP_PARAMS, and
-        # force the thread list to THREADS_SWEEP unless user passed explicit threads.
+        # Manual invocation: run only thread sweep, honour explicit --threads override.
         if args.threads == THREADS_DEFAULT:
             args.threads = THREADS_SWEEP
+        done = load_done_keys()
+        all_jobs = list(iter_jobs(args.datasets, args.variants, args.modes,
+                                  args.threads, args.trials, thread_sweep=True))
+        pending = [j for j in all_jobs if make_resume_key(j) not in done]
+        print(f"thread-sweep jobs total={len(all_jobs)}  pending={len(pending)}  "
+              f"done={len(all_jobs) - len(pending)}")
+        if args.limit:
+            pending = pending[:args.limit]
+        if args.dry_run:
+            for j in pending[:25]:
+                print(f"  {j['algo']}  {j['variant']}/{j['dataset']}  {j['mode']}  "
+                      f"threads={j['threads']}  params={j['params_json']}  trial={j['trial']}")
+            if len(pending) > 25:
+                print(f"  ... ({len(pending) - 25} more)")
+            return
+        _execute_jobs(pending)
+        if not args.no_analysis:
+            _run_analysis()
+        return
 
-    done = load_done_keys()
-    all_jobs   = list(iter_jobs(args.datasets, args.variants, args.modes,
-                                args.threads, args.trials,
-                                thread_sweep=args.thread_sweep))
-    pending = [j for j in all_jobs
-               if make_resume_key(j) not in done]
+    # ── Phase 1: full param grid (single-threaded) ───────────────────────────
+    grid_jobs = list(iter_jobs(args.datasets, args.variants, args.modes,
+                               THREADS_DEFAULT, args.trials, thread_sweep=False))
 
-    print(f"jobs total={len(all_jobs)}  pending={len(pending)}  "
+    # ── Phase 2: DiskANN thread sweep at canonical ~95%-recall op points ─────
+    # Runs automatically so a single invocation collects both the full recall
+    # curve and the thread-scaling data needed to understand DiskANN throughput.
+    sweep_jobs = list(iter_jobs(args.datasets, args.variants, args.modes,
+                                THREADS_SWEEP, args.trials, thread_sweep=True))
+
+    all_jobs = grid_jobs + sweep_jobs
+    done     = load_done_keys()
+    pending  = [j for j in all_jobs if make_resume_key(j) not in done]
+
+    print(f"phase1 (param grid): {len(grid_jobs)} jobs")
+    print(f"phase2 (thread sweep): {len(sweep_jobs)} jobs")
+    print(f"total={len(all_jobs)}  pending={len(pending)}  "
           f"done={len(all_jobs) - len(pending)}")
     if args.limit:
         pending = pending[: args.limit]
@@ -349,16 +401,24 @@ def main():
     if args.dry_run:
         for j in pending[:25]:
             print(f"  {j['algo']}  {j['variant']}/{j['dataset']}  {j['mode']}  "
-                  f"cap={j['ram_cap_bytes']}  params={j['params_json']}  "
-                  f"trial={j['trial']}")
+                  f"threads={j['threads']}  cap={j['ram_cap_bytes']}  "
+                  f"params={j['params_json']}  trial={j['trial']}")
         if len(pending) > 25:
             print(f"  ... ({len(pending) - 25} more)")
         return
 
+    _execute_jobs(pending)
+
+    if not args.no_analysis:
+        print("\n── regenerating analysis ──")
+        _run_analysis()
+
+
+def _execute_jobs(pending):
     for i, j in enumerate(pending, 1):
         t0 = time.time()
         tag = f"[{i}/{len(pending)}] {j['algo']} {j['variant']} {j['mode']} " \
-              f"{j['params_json']} trial={j['trial']}"
+              f"threads={j['threads']} {j['params_json']} trial={j['trial']}"
         print(tag)
         cap = j["ram_cap_bytes"] or None
         if j["algo"] == "tapeann":
