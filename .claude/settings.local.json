@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk -F, 'NR>1 {print $1\"-\"$3}' runs.csv)",
+      "Bash(awk -F, 'NR>1 && $1==\"tapeann\" {print $6}' runs.csv)",
+      "Bash(uv sync *)",
+      "Bash(uv run *)",
+      "Bash(awk -F, 'NR>1 {print $1, $23}' bench/results/runs.csv)",
+      "Bash(awk -F, 'NR==1 {for \\(i=1; i<=NF; i++\\) print i, $i}' bench/results/runs.csv)",
+      "Bash(awk -F, 'NR>1 {print $1\"/\"$3, \"simd=\"$23}' bench/results/runs.csv)",
+      "Bash(awk -F, 'NR>1 && $1==\"tapeann\" {print $23}' bench/results/runs.csv)"
+    ]
+  }
+}
